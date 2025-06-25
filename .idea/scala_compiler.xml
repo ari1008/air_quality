@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="ScalaCompilerConfiguration">
+    <option name="separateProdTestSources" value="true" />
+    <profile name="sbt 1" modules="air,air.main,air.test,data_prep_air_quality,data_prep_air_quality.main,data_prep_air_quality.test" />
+  </component>
+</project>
