@@ -1,6 +1,7 @@
 import org.apache.spark.ml.feature.Imputer
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.functions._
+import org.apache.spark.sql.types._
 
 object PrepareAirQualityData {
   def main(args: Array[String]): Unit = {
@@ -33,17 +34,60 @@ object PrepareAirQualityData {
       .withColumn("hospital_capacity", col("hospital_capacity").cast("double"))
       .withColumn("hospital_admissions", col("hospital_admissions").cast("double"))
 
+
+    val validYears = dfCasted
+      .filter(year(col("date")) <= 2025)
+      .select(year(col("date")).alias("year"))
+      .distinct()
+      .collect()
+      .map(_.getInt(0))
+      .sorted
+
+    val firstValidYear = if (validYears.nonEmpty) validYears.head else 2020
+    val replacementYear = firstValidYear - 1
+
+    println(s"Première année valide trouvée: $firstValidYear")
+    println(s"Les années > 2025 seront remplacées par: $replacementYear")
+
+    // Correction des dates
+    val dfCorrectedDates = dfCasted.withColumn("date",
+      when(year(col("date")) > 2025,
+        date_format(
+          to_date(
+            concat(lit(replacementYear), lit("-"),
+              month(col("date")), lit("-"),
+              dayofmonth(col("date"))),
+            "yyyy-M-d"
+          ),
+          "yyyy-MM-dd"
+        )
+      ).otherwise(col("date"))
+    )
+
+    // Affichage des corrections effectuées
+    val correctedCount = dfCasted.filter(year(col("date")) > 2025).count()
+    println(s"Nombre de dates corrigées: $correctedCount")
+
     // Suppression des lignes avec hospital_admissions manquant (variable cible)
-    val dfWithoutNullTarget = dfCasted.na.drop(cols = Seq("hospital_admissions"))
+    val dfWithoutNullTarget = dfCorrectedDates.na.drop(cols = Seq("hospital_admissions"))
 
-    // Imputation des valeurs manquantes par la moyenne pour les colonnes numériques
+    // Imputation des valeurs manquantes par la MÉDIANE pour les colonnes numériques
     val numericCols = Seq("pm2_5","pm10","no2","o3","temperature","humidity","aqi","hospital_capacity")
-    val imputer = new Imputer()
-      .setStrategy("mean")
-      .setInputCols(numericCols.toArray)
-      .setOutputCols(numericCols.toArray)
 
-    val dfImputed = imputer.fit(dfWithoutNullTarget).transform(dfWithoutNullTarget)
+    println("Imputation par la médiane en cours...")
+
+    val medians = numericCols.map { colName =>
+      val median = dfWithoutNullTarget.stat.approxQuantile(colName, Array(0.5), 0.0)(0)
+      println(s"Médiane pour $colName: $median")
+      (colName, median)
+    }.toMap
+
+    val dfImputed = numericCols.foldLeft(dfWithoutNullTarget) { (df, colName) =>
+      df.withColumn(colName,
+        when(col(colName).isNull, lit(medians(colName)))
+          .otherwise(col(colName))
+      )
+    }
 
     // Suppression des outliers sur hospital_admissions (variable cible)
     val quantiles = dfImputed.stat.approxQuantile("hospital_admissions", Array(0.25, 0.75), 0.0)
@@ -61,7 +105,9 @@ object PrepareAirQualityData {
     println("Colonnes finales (identiques aux originales):")
     finalDF.columns.foreach(println)
 
-    // Suppression manuelle du dossier de sortie si il existe
+    println("\nÉchantillon des dates après correction:")
+    finalDF.select("date").distinct().orderBy("date").show(10)
+
     import java.io.File
     def deleteDirectory(dir: File): Unit = {
       if (dir.exists()) {
@@ -74,7 +120,6 @@ object PrepareAirQualityData {
     }
     deleteDirectory(new File(outputCsvPath))
 
-    // Sauvegarde en CSV avec les mêmes colonnes que l'original
     finalDF.coalesce(1).write
       .mode("overwrite")
       .option("header", "true")
